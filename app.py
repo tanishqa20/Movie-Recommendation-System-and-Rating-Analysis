@@ -235,7 +235,11 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 OUTPUT_DIR = BASE_DIR / "outputs"
 
+
 CLEAN_MOVIES = OUTPUT_DIR / "clean_movies.csv"
+if not CLEAN_MOVIES.exists():
+    CLEAN_MOVIES = BASE_DIR / "clean_movies.csv"
+
 METADATA_FILE = DATA_DIR / "movies_metadata.csv"
 LINKS_FILE = DATA_DIR / "links.csv"
 
