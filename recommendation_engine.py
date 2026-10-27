@@ -1,113 +1,88 @@
 
-import pandas as pd
-import ast
 from pathlib import Path
+
+import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-DATA_DIR = Path("outputs")
+BASE_DIR = Path(__file__).resolve().parent
 
-# Load movie data
-movies = pd.read_csv(DATA_DIR / "clean_movies.csv")
+# Support both the repository root and the outputs folder.
+possible_paths = [
+    BASE_DIR / "outputs" / "clean_movies.csv",
+    BASE_DIR / "clean_movies.csv",
+]
+
+MOVIES_PATH = next((p for p in possible_paths if p.is_file()), None)
+
+if MOVIES_PATH is None:
+    raise FileNotFoundError(
+        "clean_movies.csv was not found. "
+        "Place it in the repository root or the outputs folder."
+    )
+
+movies = pd.read_csv(MOVIES_PATH)
+
+required_columns = {"title", "genres", "overview", "vote_average"}
+missing_columns = required_columns - set(movies.columns)
+
+if missing_columns:
+    raise ValueError(
+        f"clean_movies.csv is missing columns: {sorted(missing_columns)}"
+    )
+
 movies = movies.dropna(subset=["title"]).copy()
-movies["title"] = movies["title"].astype(str)
 
+for column in ["genres", "overview"]:
+    movies[column] = movies[column].fillna("").astype(str)
 
-# Extract genre names
-def extract_genres(value):
-    try:
-        data = ast.literal_eval(value)
-        if isinstance(data, list):
-            return " ".join(
-                item.get("name", "")
-                for item in data
-                if isinstance(item, dict)
-            )
-    except (ValueError, SyntaxError, TypeError):
-        pass
-    return ""
+movies["vote_average"] = pd.to_numeric(
+    movies["vote_average"], errors="coerce"
+).fillna(0)
 
+movies["combined_features"] = (
+    movies["genres"] + " " + movies["overview"]
+).str.strip()
 
-# Prepare features
-movies["genres_text"] = movies["genres"].apply(extract_genres)
-movies["overview"] = movies["overview"].fillna("").astype(str)
-
-# Remove movies without genre information
-movies = movies[
-    movies["genres_text"].str.strip().ne("")
-].copy()
-
-movies["genres_text"] = movies["genres_text"].str.lower()
-movies["overview"] = movies["overview"].str.lower()
-movies = movies.reset_index(drop=True)
-
-# Create separate TF-IDF matrices
-genre_vectorizer = TfidfVectorizer()
-overview_vectorizer = TfidfVectorizer(
+tfidf = TfidfVectorizer(
     stop_words="english",
     max_features=20000
 )
 
-genre_matrix = genre_vectorizer.fit_transform(movies["genres_text"])
-overview_matrix = overview_vectorizer.fit_transform(movies["overview"])
-
-print("Content-based recommendation model created successfully.")
-print("Movies available:", len(movies))
+tfidf_matrix = tfidf.fit_transform(movies["combined_features"])
 
 
 def recommend_movies(title, top_n=10):
     matches = movies[
-        movies["title"].str.casefold() == title.casefold()
+        movies["title"].str.casefold() == str(title).casefold()
     ]
 
     if matches.empty:
-        print(f"Movie not found: {title}")
-        return pd.DataFrame()
+        partial_matches = movies[
+            movies["title"].str.contains(
+                str(title), case=False, na=False, regex=False
+            )
+        ]
+        if partial_matches.empty:
+            return pd.DataFrame()
+        movie_index = partial_matches.index[0]
+    else:
+        movie_index = matches.index[0]
 
-    movie_index = matches.index[0]
+    position = movies.index.get_loc(movie_index)
 
-    # Calculate similarities for the selected movie only
-    genre_scores = cosine_similarity(
-        genre_matrix[movie_index],
-        genre_matrix
-    ).flatten()
+    scores = cosine_similarity(
+        tfidf_matrix[position], tfidf_matrix
+    ).ravel()
 
-    overview_scores = cosine_similarity(
-        overview_matrix[movie_index],
-        overview_matrix
-    ).flatten()
+    ranked_positions = scores.argsort()[::-1]
+    ranked_positions = [
+        i for i in ranked_positions if i != position
+    ][:top_n]
 
-    # Combine genre and overview similarity
-    scores = 0.70 * genre_scores + 0.30 * overview_scores
+    recommendations = movies.iloc[ranked_positions].copy()
+    recommendations["similarity_score"] = scores[ranked_positions]
 
-    # Rank movies by similarity
-    ranked_indices = scores.argsort()[::-1]
-    results = []
-
-    for index in ranked_indices:
-        if index == movie_index:
-            continue
-
-        results.append(index)
-
-        if len(results) == top_n:
-            break
-
-    recommendations = movies.iloc[results][
-        ["title", "genres_text", "vote_average"]
-    ].copy()
-
-    recommendations.insert(
-        0, "similarity", scores[results].round(3)
-    )
-
-    return recommendations.reset_index(drop=True)
-
-
-if __name__ == "__main__":
-    for movie_title in ["Toy Story", "Jumanji"]:
-        print(f"\nRecommendations for {movie_title}:\n")
-        results = recommend_movies(movie_title)
-
-        if not results.empty:
-            print(results.to_string(index=False))
+    return recommendations[
+        ["title", "genres", "vote_average", "similarity_score"]
+    ].reset_index(drop=True)
